@@ -1,0 +1,35 @@
+defaults:
+  line: "#6B7280"
+  bar: "#9CA3AF"
+  hline: "#9CA3AF"
+  candle_increasing: "#10B981"
+  candle_decreasing: "#EF4444"
+
+traces:
+  "BB MA": "#2563EB"
+  "BB Upper": "#93C5FD"
+  "BB Lower": "#93C5FD"
+  "MACD Hist": "#A78BFA"
+  "MACD": "#7C3AED"
+  "Signal": "#F59E0B"
+  "RSI 14": "#22C55E"
+  "RSI Upper": "#6B7280"
+  "RSI Lower": "#6B7280"
+  "%K": "#0EA5E9"
+  "%D": "#F97316"
+  "CCI 20": "#E11D48"
+
+candlestick:
+  increasing_line: "#10B981"
+  increasing_fill: "#A7F3D0"
+  decreasing_line: "#EF4444"
+  decreasing_fill: "#FECACA"
+
+palettes:
+  ma: ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+status:
+  good: "#10B981"
+  warn: "#F59E0B"
+  bad: "#EF4444"
+  neutral: "#9CA3AF"
