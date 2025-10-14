@@ -1,0 +1,7 @@
+[theme]
+base = "dark"
+primaryColor = "#5B7CFA"            # refined indigo accent
+backgroundColor = "#0B1220"         # deep navy canvas
+secondaryBackgroundColor = "#0F172A"# slate panels
+textColor = "ghostWhite"               # soft light text
+font = "sans serif"
