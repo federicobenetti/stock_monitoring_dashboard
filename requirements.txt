@@ -6,3 +6,5 @@ altair>=5.0.0
 matplotlib
 plotly
 pyyaml
+yfinance
+pandas-ta

@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yaml
 from pathlib import Path
+import yfinance as yf
 
 from colors import color_of, candle_kwargs, ma_color
 from kpis import (
@@ -22,13 +23,159 @@ st.set_page_config(page_title="Stocks dashboard",
 Review single stock performance and main indicators
 """
 
-
-@st.cache_data
-def load_data():
-    main = pd.read_csv("data/raw/main_wide.csv", parse_dates=["date"])
-    pre = pd.read_csv("data/processed/precomputed_wide.csv", parse_dates=["date"])
-    df = pd.merge(main, pre, on=["date", "ticker"], how="left")
-    return df, main, pre
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def fetch_and_process_data(ticker: str, period: str = "2y"):
+    """
+    Fetch OHLCV data from yfinance and compute technical indicators.
+    
+    Args:
+        ticker: Stock ticker symbol
+        period: Period to fetch (1mo, 3mo, 6mo, 1y, 2y, 5y, max)
+    
+    Returns:
+        tuple: (main_df, processed_df) - OHLCV data and computed indicators
+    """
+    
+    # Fetch data from yfinance
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period=period)
+    
+    if hist.empty:
+        raise ValueError(f"No data found for ticker {ticker}")
+    
+    # Prepare main dataframe (OHLCV)
+    main = hist.reset_index()
+    main.columns = [col.lower().replace(' ', '_') for col in main.columns]
+    
+    # Handle different possible column names
+    if 'adj_close' not in main.columns:
+        if 'adjclose' in main.columns:
+            main = main.rename(columns={'adjclose': 'adj_close'})
+        else:
+            main['adj_close'] = main['close']  # Fallback if adj_close doesn't exist
+    
+    main['ticker'] = ticker
+    main = main[['date', 'ticker', 'open', 'high', 'low', 'close', 'adj_close', 'volume']]
+    
+    # Prepare processed dataframe with indicators
+    df = main.copy()
+    
+    # Simple Moving Averages
+    df['SMA_20'] = df['close'].rolling(window=20).mean()
+    df['SMA_50'] = df['close'].rolling(window=50).mean()
+    df['SMA_100'] = df['close'].rolling(window=100).mean()
+    df['SMA_200'] = df['close'].rolling(window=200).mean()
+    
+    # Exponential Moving Averages
+    df['EMA_12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['EMA_26'] = df['close'].ewm(span=26, adjust=False).mean()
+    
+    # Bollinger Bands
+    df['BB_MA_20'] = df['close'].rolling(window=20).mean()
+    bb_std = df['close'].rolling(window=20).std()
+    df['BB_UPPER_20_2'] = df['BB_MA_20'] + (2 * bb_std)
+    df['BB_LOWER_20_2'] = df['BB_MA_20'] - (2 * bb_std)
+    
+    # MACD
+    ema_12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema_26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD_12_26_9'] = ema_12 - ema_26
+    df['MACD_SIGNAL_9'] = df['MACD_12_26_9'].ewm(span=9, adjust=False).mean()
+    df['MACD_HIST'] = df['MACD_12_26_9'] - df['MACD_SIGNAL_9']
+    
+    # RSI
+    def calculate_rsi(series, period=14):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    df['RSI_14'] = calculate_rsi(df['close'], 14)
+    
+    # Stochastic Oscillator
+    def calculate_stochastic(high, low, close, k_period=14, d_period=3, smooth_k=3):
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
+        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        k_smooth = k_percent.rolling(window=smooth_k).mean()
+        d_percent = k_smooth.rolling(window=d_period).mean()
+        return k_smooth, d_percent
+    
+    df['STOCH_K_14_3'], df['STOCH_D_3'] = calculate_stochastic(
+        df['high'], df['low'], df['close'], k_period=14, d_period=3, smooth_k=3
+    )
+    
+    # CCI (Commodity Channel Index)
+    def calculate_cci(high, low, close, period=20):
+        tp = (high + low + close) / 3
+        sma_tp = tp.rolling(window=period).mean()
+        mad = tp.rolling(window=period).apply(lambda x: np.abs(x - x.mean()).mean())
+        cci = (tp - sma_tp) / (0.015 * mad)
+        return cci
+    
+    df['CCI_20'] = calculate_cci(df['high'], df['low'], df['close'], 20)
+    
+    # ATR (Average True Range)
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        return atr
+    
+    df['ATR_14'] = calculate_atr(df['high'], df['low'], df['close'], 14)
+    
+    # Annualized Volatility (30D and 90D)
+    df['ANNUALIZED_VOL_30D'] = df['close'].pct_change().rolling(30).std() * np.sqrt(252)
+    df['ANNUALIZED_VOL_90D'] = df['close'].pct_change().rolling(90).std() * np.sqrt(252)
+    
+    # Max Drawdown (90D)
+    def max_drawdown(series, window):
+        roll_max = series.rolling(window, min_periods=1).max()
+        drawdown = (series - roll_max) / roll_max
+        return drawdown.rolling(window, min_periods=1).min()
+    
+    df['MAX_DRAWDOWN_90D'] = max_drawdown(df['close'], 90)
+    
+    # Signals
+    # MACD Bullish Cross: MACD crosses above Signal
+    df['SIG_MACD_BULLISH_CROSS'] = (
+        (df['MACD_12_26_9'] > df['MACD_SIGNAL_9']) & 
+        (df['MACD_12_26_9'].shift(1) <= df['MACD_SIGNAL_9'].shift(1))
+    ).astype(int)
+    
+    # RSI Oversold (RSI < 30)
+    df['SIG_RSI_OVERSOLD'] = (df['RSI_14'] < 30).astype(int)
+    
+    # RSI Overbought (RSI > 70)
+    df['SIG_RSI_OVERBOUGHT'] = (df['RSI_14'] > 70).astype(int)
+    
+    # BB Breakout Up (Close > Upper Band)
+    df['SIG_BB_BREAKOUT_UP'] = (df['close'] > df['BB_UPPER_20_2']).astype(int)
+    
+    # BB Breakout Down (Close < Lower Band)
+    df['SIG_BB_BREAKOUT_DOWN'] = (df['close'] < df['BB_LOWER_20_2']).astype(int)
+    
+    # Select processed columns
+    processed_cols = [
+        'date', 'ticker', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200',
+        'EMA_12', 'EMA_26', 'BB_MA_20', 'BB_UPPER_20_2', 'BB_LOWER_20_2',
+        'MACD_12_26_9', 'MACD_SIGNAL_9', 'MACD_HIST', 'RSI_14',
+        'STOCH_K_14_3', 'STOCH_D_3', 'CCI_20', 'ATR_14',
+        'ANNUALIZED_VOL_30D', 'ANNUALIZED_VOL_90D', 'MAX_DRAWDOWN_90D',
+        'SIG_MACD_BULLISH_CROSS', 'SIG_RSI_OVERSOLD', 'SIG_RSI_OVERBOUGHT',
+        'SIG_BB_BREAKOUT_UP', 'SIG_BB_BREAKOUT_DOWN'
+    ]
+    
+    pre = df[processed_cols].copy()
+    
+    # Merge main and processed to create the combined df
+    combined = pd.merge(main, pre, on=['date', 'ticker'], how='left')
+    
+    return combined, main, pre
 
 # --- Defaults from config ---
 DEFAULTS_FALLBACK = {"ma_periods": [20, 50, 100, 200], "bb_period": 20, "bb_k": 2.0}
@@ -58,15 +205,36 @@ def compute_overlays(frame: pd.DataFrame, ma_periods, bb_period: int, bb_k: floa
     bb_lower = bb_ma - float(bb_k) * bb_std
     return ma_series, bb_ma, bb_upper, bb_lower
 
-df, main, pre = load_data()
+# Initialize session state for parameters
 init_params()
 
-col1, col2 = st.columns([0.6, 0.4])
-
-# ---------- Controls ----------
+# ---------- Sidebar Controls ----------
 st.sidebar.title("Controls")
-tickers = sorted(df["ticker"].unique().tolist())
-ticker = st.sidebar.selectbox("Ticker", tickers, index=0)
+
+# Preset tickers with ability to type new ones
+preset_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "JPM", "V", "WMT", 
+                  "SPY", "QQQ", "DIA", "BA", "DIS", "NFLX", "INTC", "AMD", "CSCO", "ORCL"]
+
+ticker = st.sidebar.selectbox(
+    "Ticker symbol",
+    preset_tickers,
+    index=0,
+    placeholder="Select a ticker or type a new one",
+    accept_new_options=True,
+)
+
+if ticker:
+    ticker = ticker.upper()
+
+# Fetch data for selected ticker
+with st.spinner(f'Fetching data for {ticker}...'):
+    df, main, pre = fetch_and_process_data(ticker, period="2y")
+
+if df is None:
+    st.error(f"Unable to fetch data for ticker: {ticker}. Please check the ticker symbol.")
+    st.stop()
+
+# Date range selector (AFTER data is loaded)
 date_min, date_max = df["date"].min(), df["date"].max()
 date_range = st.sidebar.date_input("Date range", (date_min, date_max), min_value=date_min, max_value=date_max)
 
@@ -100,11 +268,16 @@ BB_PERIOD = st.session_state["bb_period"]
 BB_K = st.session_state["bb_k"]
 
 start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+# Remove timezone from date column for comparison
+if df["date"].dt.tz is not None:
+    df["date"] = df["date"].dt.tz_localize(None)
+
 f = df[(df["ticker"] == ticker) & (df["date"].between(start, end))].copy()
 
 ma_series, bb_ma, bb_upper, bb_lower = compute_overlays(f, MA_PERIODS, BB_PERIOD, BB_K)
 
 
+col1, col2 = st.columns([0.6, 0.4])
 
 # ---------- 1) Price + BB and MACD ----------
 with col1:
